@@ -1,0 +1,10 @@
+torch
+torchvision
+roma
+matplotlib
+tqdm
+opencv-python
+scipy
+einops
+tensorboard
+pandas
