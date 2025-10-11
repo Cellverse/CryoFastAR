@@ -21,9 +21,9 @@ BASE_ARGS=(
 # Datasets list
 DATASETS=(
   "data/real/10028/"
-  "data/real/10049/"
-  "data/real/10076/"
-  "data/real/10180/"
+  # "data/real/10049/"
+  # "data/real/10076/"
+  # "data/real/10180/"
 )
 
 # Current date

@@ -578,7 +578,8 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
         batch_size=B,
         shuffle=False,
         num_workers=args.num_workers,
-        drop_last=False
+        drop_last=False,
+        persistent_workers=False,
     )
     
     # Variables for evaluation metrics
@@ -1000,7 +1001,8 @@ def do_evaluation(args, device):
                 if args.per_scene:
                     out_filename = os.path.join(args.out_dir, f"volume_snr{snr}_views{num_views}.mrc")
                     apix = dataset_test.cached_apix
-                    MRCFile.write(out_filename, np.array(volume.cpu()).astype("float32"), Apix=dataset_test.cached_apix)
+                    arr = volume.detach().to(torch.float32).cpu().numpy()
+                    MRCFile.write(out_filename, arr, Apix=apix)
                     print(f"Saved volume to {out_filename}")
 
                 # Save estimated poses and translations in cryodrgn format

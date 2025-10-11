@@ -79,12 +79,6 @@ class CryoMultiViewDataset(EasyDataset):
         self.im_size = (128, 128)
         if mode == 'ht':
             self.norm = norm or self.estimate_normalization()
-        elif mode == 'unfft':
-            self.ktraj = self.create_ktraj(spokelength=128, nspokes=128)
-            self.grid_size = (128, 128) # (spokelength, spokelength)
-
-            import torchkbnufft as tkbn
-            self.nufft_ob = tkbn.KbNufft(im_size=self.im_size, grid_size=self.grid_size)
 
         self.per_scene = per_scene
 
@@ -251,10 +245,6 @@ class CryoMultiViewDataset(EasyDataset):
             data = (data - self.norm[0]) / self.norm[1]
             data = torch.abs(data)
             data = torch.log(data + 1)
-        elif mode == 'unfft':
-            data = data[:, None, :, :]
-            data = self.nufft_ob(data, self.ktraj)
-            data = np.log10(np.absolute(data))
         elif mode == 'none':
             return data.reshape(orignal_shape)
         elif mode == 'std':
