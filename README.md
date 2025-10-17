@@ -38,6 +38,28 @@ bash evaluate_model_real.sh
 bash evaluate_model_synthetic.sh
 ```
 
+### Reconstruction Progress Visualization
+
+To inspect how the 3D volume grows while the model consumes new views, use the helper below:
+
+```bash
+python visualize_reconstruction_progress.py \
+    --ckpt-path checkpoints/cryofastar.pth \
+    --root-path data/your_dataset \
+    --num-views 64 \
+    --out-dir results/progress_example
+```
+
+This script runs a single evaluation pass but saves intermediate diagnostics in `results/progress_example/`:
+- `renders/render_XXXX.png`: top-row input thumbnails, volume slices, a max-intensity projection, the pose scatter, an orientation heat map, and the 2D shift error map (disable via `--render-mode none`).
+- `progress.csv`: timeline metadata (time, processed images vs. total, sampled ids, etc.).
+- `pose_reference_dirs.npy` / `pose_inference_dirs.npy`: accumulated pose orientations for reference and inference views; optional `pose_<metric>_values.npy` matches the chosen pose heat-map metric.
+- `translation_positions.npy` / `translation_errors.npy`: shift statistics gathered during the run.
+- `progress.mp4`: automatically generated 16:9 video (10 fps by default) that strings the renders together; skip via `--no-video` or adjust speed with `--video-fps`.
+
+Use `--snapshot-interval` to control how often a snapshot is written, pass `--max-snapshots` if you want to cap how many are kept (the default keeps all), and switch to `--pose-source gt` to visualise the ground-truth pose distribution instead of predictions.
+`--pose-heatmap-metric` now supports `loss3d`, rotation angle (`rot`), F-norm rotation error (`rot_fro`), 2D shift error (`shift`), or plain density; combine with `--heatmap-vmin/--heatmap-vmax` to clamp the color bar. Turn on `--snapshot-regularize` if you prefer the slower but sharper Fourier-domain filtering for each saved volume.
+
 ### Citation
 
 ```

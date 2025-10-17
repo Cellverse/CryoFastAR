@@ -21,6 +21,8 @@ Notes:
   2. Depending on your dataset, you may need to adjust the `get_views()` method in `MultiviewDataset`.  
 
 """
+import multiprocessing as mp
+mp.set_start_method('spawn', force=True)
 
 import os
 import sys
@@ -29,6 +31,8 @@ import time
 import argparse
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
@@ -528,7 +532,7 @@ def save_as_cryodrgn_format(path, pose, trans, ids=None):
 # -------------------------------
 # 合并评估与体积重建函数
 # -------------------------------
-def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, device):
+def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, device, progress_callback=None):
     """
     Perform a single forward pass on the given dataset for both evaluation 
     (Kabsch-based) and volume reconstruction, in order to avoid redundant inference.  
@@ -546,6 +550,11 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
               reference_views, use_amp, gt_image, gt_pose, reg_pose, etc.
         num_views: Total number of views used for the current evaluation.
         device: Computation device.
+        progress_callback: Optional callable invoked after each slice accumulation.
+            It receives three arguments: the current `volume_full` tensor, the
+            `counts_full` tensor, and a metadata dictionary describing the
+            reconstruction progress (e.g., batch index, view index, elapsed time,
+            pose estimates).
 
     Returns:
         metrics: A dictionary containing raw values and statistics (mean, median, variance) 
@@ -603,7 +612,43 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
     
     model.eval()
 
-    for batch in tqdm(dataloader, desc="Evaluation & Volume Reconstruction"):
+    grid_cache = {}
+
+    def get_grid(batch_size):
+        if batch_size not in grid_cache:
+            grid_cache[batch_size] = generate_xyz_grid(batch_size, D).to(device)
+        return grid_cache[batch_size]
+
+    slice_counter = 0
+    view_counter = 0
+    total_unique = len(dataset_test)
+    processed_mask = torch.zeros(total_unique, dtype=torch.bool)
+
+    if progress_callback is not None:
+        metadata = {
+            "batch_index": -1,
+            "view_index": -1,
+            "global_view_index": 0,
+            "batch_size": 0,
+            "slices_processed": 0,
+            "time_elapsed": 0.0,
+            "sample_ids": None,
+            "pred_poses": None,
+            "gt_poses": None,
+            "pred_translations": None,
+            "reference_views": ref_views,
+            "num_views_per_sample": num_views,
+            "loss3d": None,
+            "rot_angle_deg": None,
+            "rot_fro_norm": None,
+            "trans_error": None,
+            "translation_positions": None,
+            "images_processed": 0,
+            "images_total": total_unique,
+        }
+        progress_callback(volume_full, counts_full, metadata)
+
+    for batch_index, batch in enumerate(tqdm(dataloader, desc="Evaluation & Volume Reconstruction")):
         for view in batch:
             for name in 'img pose pts3d clean_img chi translation trans'.split():  # pseudo_focal
                 if name not in view:
@@ -621,6 +666,8 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
         poses = [view.get('pose') for view in batch]
         translates = [view.get('trans') for view in batch]
         gt_translations = [view.get('translation') for view in batch]
+        gt_images = [view.get('img') for view in batch]
+        gt_image_tensor = torch.cat(gt_images, dim=0)
 
         B = poses[0].shape[0]  # batch size
         # Iterate over each view except the reference views
@@ -628,11 +675,13 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
 
             ctf_mul = 1
 
+            pose0 = poses[0].reshape(-1, 3, 3)
+            reference_dirs_cpu = pose0[:, :, 2].detach().cpu()
+
             if j < ref_views:
                 continue
 
             # Compute relative pose: pose_rel = poses[j] @ poses[0]^T
-            pose0 = poses[0].reshape(-1, 3, 3)
             pose_rel = pose.reshape(-1, 3, 3) @ pose0.transpose(2, 1)
             
             # ---------------------------
@@ -640,7 +689,7 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
             # ---------------------------
             # Compute ground truth 3D coordinates (for evaluation). 
             # Note: this does not depend on predictions
-            ff_coord_gt = generate_xyz_grid(B, D).to(device).reshape(B, -1, 3)
+            ff_coord_gt = get_grid(B).reshape(B, -1, 3)
             ff_coord_gt = ff_coord_gt @ pose_rel
             
             # Compute predicted 3D coordinates for evaluation: taken from preds[j]['pts3d']
@@ -650,7 +699,7 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
             start_time = time.time()
             # Use the generated reference point cloud (same as generate_xyz_grid) 
             # and predicted 3D coordinates to compute Kabsch-estimated rotation
-            ref_pc = generate_xyz_grid(B, D).reshape(B, -1, 3).to(device)
+            ref_pc = get_grid(B).reshape(B, -1, 3)
             T = kabsch_pose_estimation(ref_pc, ff_coord_eval)
             pred_poses_eval = T[:, :3, :3].transpose(2, 1)
             pose_reg_time += time.time() - start_time
@@ -659,6 +708,7 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
             loss3d = torch.abs(ff_coord_eval - ff_coord_gt) * D
             loss3d = loss3d.reshape(B, -1).mean(dim=-1)
             loss3d_list.append(loss3d)
+            loss3d_cpu = loss3d.detach().cpu()
             
             gt_poses_list.append(pose_rel)
             pred_poses_list.append(pred_poses_eval)
@@ -666,24 +716,38 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
             # Compute rotation errors: call rotation_error_angle and rotation_error_norm (batched)
             rot_angle = rotation_error_angle(pose_rel, pred_poses_eval)  # shape (B,)
             rot_angle_errors.extend(rot_angle.tolist())
+            rot_angle_deg = torch.rad2deg(rot_angle).detach().cpu()
             rot_norm = rotation_error_norm(pose_rel, pred_poses_eval)    # shape (B,)
             rot_norm_errors.extend(rot_norm.tolist())
+            rot_norm_cpu = rot_norm.detach().cpu()
             
             # Compute translation errors: for each sample, obtain 2D translation vector 
             # via compute_translation, then compute L2 error
+            trans_error_vals = []
+            trans_position_vals = []
             if args.augment:
                 for b in range(B):
                     t_gt = translates[j][b][...,:2] * D
                     t_pred = compute_translation(ff_coord_eval[b], D)
                     trans_err = translation_error(t_gt, t_pred)
                     trans_errors.append(trans_err.item())
+                    trans_error_vals.append(trans_err.detach().cpu())
+                    trans_position_vals.append(t_gt.detach().cpu())
             else:
                 for b in range(B):
                     t_gt = gt_translations[j][b][...,:2] * D
                     t_pred = compute_translation(ff_coord_eval[b], D)
                     trans_err = translation_error(t_gt, t_pred)
                     trans_errors.append(trans_err.item())
+                    trans_error_vals.append(trans_err.detach().cpu())
+                    trans_position_vals.append(t_gt.detach().cpu())
                     pred_translations.append(t_pred)
+            if trans_error_vals:
+                trans_error_cpu = torch.stack(trans_error_vals).to(torch.float32)
+                trans_position_cpu = torch.stack(trans_position_vals).to(torch.float32)
+            else:
+                trans_error_cpu = None
+                trans_position_cpu = None
             
             pred_ids.append(batch[j]['id'])
             
@@ -695,6 +759,8 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
             # Otherwise, handle according to args.gt_image and args.reg_pose 
             # (same logic as in run_volume_reconstruction).
             start_time = time.time()
+            pred_trans_current = None
+
             if args.gt_pose:
                 ff_coord_vol = ff_coord_gt
             elif not args.gt_image:
@@ -716,11 +782,12 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
                     t_val = compute_translation(ff_coord_vol[b], D) * 2 
                     pred_trans.append(t_val)
                 pred_trans = torch.stack(pred_trans, dim=0).to(device)
+                pred_trans_current = pred_trans
                 
                 if args.reg_pose:
                     pred_poses_reg = pred_poses_eval
 
-                    grid = generate_xyz_grid(B, D).to(device)
+                    grid = get_grid(B)
                     ff_coord_vol = grid.reshape(B, -1, 3)
                     ff_coord_vol = ff_coord_vol * (D // 2)
                     ff_coord_vol = ff_coord_vol @ pred_poses_reg @ pose0.transpose(2, 1)
@@ -757,7 +824,61 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
             ctf_mul = ctf_mul.reshape(B, -1)[circular_mask]
             add_slice(volume_full, counts_full, ff_coord_vol, img, D, ctf_mul)
             recon_time += time.time() - start_time
-        
+
+            view_counter += 1
+            if progress_callback is not None:
+                sample_ids = batch[j].get('id')
+                if isinstance(sample_ids, torch.Tensor):
+                    sample_ids_meta = sample_ids.detach().cpu()
+                else:
+                    sample_ids_meta = sample_ids
+                if sample_ids_meta is not None:
+                    ids_tensor = torch.as_tensor(sample_ids_meta, dtype=torch.long)
+                    ids_tensor = ids_tensor[(ids_tensor >= 0) & (ids_tensor < total_unique)]
+                    processed_mask[ids_tensor] = True
+                images_processed = int(processed_mask.sum().item())
+                slice_counter = images_processed
+                progress_time = inference_time + recon_time
+                thumbnails = None
+                if 'img' in batch[j]:
+                    thumb_tensor = gt_image_tensor.detach().cpu().squeeze(1)
+                    # thumb_tensor = batch[j]['img'].detach().cpu().squeeze(1)
+                    if thumb_tensor.ndim == 3 and thumb_tensor.shape[0] > 0:
+                        max_thumbs = min(10, thumb_tensor.shape[0])
+                        thumb_list = []
+                        for idx_thumb in range(max_thumbs):
+                            frame = thumb_tensor[-idx_thumb-1]
+                            frame = frame - frame.min()
+                            denom = frame.max()
+                            if denom > 0:
+                                frame = frame / denom
+                            thumb_list.append(frame.to(torch.float32))
+                        if thumb_list:
+                            thumbnails = torch.stack(thumb_list, dim=0)
+                metadata = {
+                    "batch_index": batch_index,
+                    "view_index": j,
+                    "global_view_index": view_counter,
+                    "batch_size": B,
+                    "slices_processed": slice_counter,
+                    "time_elapsed": progress_time,
+                    "sample_ids": sample_ids_meta,
+                    "pred_poses": pred_poses_eval.detach().cpu(),
+                    "gt_poses": pose_rel.detach().cpu(),
+                    "pred_translations": pred_trans_current.detach().cpu() if pred_trans_current is not None else None,
+                    "reference_dirs": reference_dirs_cpu,
+                    "reference_views": ref_views,
+                    "num_views_per_sample": len(poses),
+                    "loss3d": loss3d_cpu,
+                    "rot_angle_deg": rot_angle_deg,
+                    "rot_fro_norm": rot_norm_cpu,
+                    "trans_error": trans_error_cpu,
+                    "translation_positions": trans_position_cpu,
+                    "images_processed": images_processed,
+                    "images_total": total_unique,
+                    "thumbnails": thumbnails,
+                }
+                progress_callback(volume_full, counts_full, metadata)
         
     
     pred_ids = torch.cat(pred_ids, dim=0).reshape(-1)
@@ -817,12 +938,14 @@ def run_evaluation_and_recon(model, dataset_test, args, num_views, ref_offset, d
     volume_full = regularize_volume(volume_full, counts_full, 10.0)
     recon_time += time.time() - start_time
 
-    total_time = time.time() - total_time_start
-
+    wall_clock_total = time.time() - total_time_start
+    total_time = inference_time + recon_time
+    
     metrics["inference_time"] = inference_time
     metrics["pose_reg_time"] = pose_reg_time
     metrics["recon_time"] = recon_time
     metrics["total_time"] = total_time
+    metrics["wall_clock_time"] = wall_clock_total
     
     return metrics, gt_poses_tensor, pred_poses_tensor, pred_translations, pred_ids, volume_full
 

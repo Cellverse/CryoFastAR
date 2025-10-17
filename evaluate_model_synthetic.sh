@@ -11,7 +11,7 @@ python evaluate_model.py --ckpt_path checkpoints/synthetic.pth \
                          --batch_size 4 \
                          --resolution 128 \
                          --reference_views 1 \
-                         --num_workers 1 \
+                         --num_workers 8 \
                          --gt_image \
                          --reg_pose \
                          --out_dir "results/${DATE}_spliceosome_synthetic" \
