@@ -10,8 +10,6 @@ Accepted by ICCV 2025
   <img src="images/teaser.png", width=800>
 </p>
 
-### This repo is under construction.
-
 ### Installation
 
 1. Clone repo
