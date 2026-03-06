@@ -58,6 +58,18 @@ This script runs a single evaluation pass but saves intermediate diagnostics in 
 Use `--snapshot-interval` to control how often a snapshot is written, pass `--max-snapshots` if you want to cap how many are kept (the default keeps all), and switch to `--pose-source gt` to visualise the ground-truth pose distribution instead of predictions.
 `--pose-heatmap-metric` now supports `loss3d`, rotation angle (`rot`), F-norm rotation error (`rot_fro`), 2D shift error (`shift`), or plain density; combine with `--heatmap-vmin/--heatmap-vmax` to clamp the color bar. Turn on `--snapshot-regularize` if you prefer the slower but sharper Fourier-domain filtering for each saved volume.
 
+## 📜 License & Commercial Use
+
+This project adopts a **split licensing** model for its source code and model weights:
+
+- **Model Weights & Datasets**: Licensed under **[CC BY-NC 4.0]**. They are strictly for academic research and personal, non-commercial use. 
+- **Source Code**: Licensed under the **[PolyForm Noncommercial 1.0.0]** License. Restricted to academic, personal, and non-profit use.
+
+**💼 Commercial Licensing**
+Any commercial use of the source code, model weights, or their derivatives (including fine-tuned models) is strictly prohibited without explicit written permission. If you or your organization wish to use this project for commercial products, APIs, or internal business operations, please obtain a commercial license by contacting us at:
+📧 Email: `contact@cellverse.tech` or `jiakai0309@gmail.com`
+
+
 ### Citation
 
 ```
